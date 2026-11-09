@@ -1,0 +1,9 @@
+** Error: 5fs+0: timing check violation: $setuphold(4fs, 5fs, 2fs)
+** Error: 7fs+0: timing check violation: $setuphold(5fs, 7fs, 3fs)
+** Error: 7fs+0: timing check violation: $setuphold(5fs, 7fs, 3fs)
+** Error: 15fs+0: timing check violation: $setuphold(15fs, 15fs, 3fs)
+** Error: 15fs+0: timing check violation: $setuphold(15fs, 15fs, 3fs)
+** Error: 20fs+0: timing check violation: $setuphold(18fs, 20fs, 4fs)
+** Error: 25fs+0: timing check violation: $setuphold(24fs, 25fs, 2fs)
+** Error: 25fs+0: timing check violation: $setuphold(24fs, 25fs, 2fs)
+** Note: 28fs+0: $finish called

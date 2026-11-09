@@ -93,5 +93,6 @@ module mod4;   // Check specify
     $setup(edge d, clk, 10);
     $setup(negedge d, posedge clk, 5);
     $hold(posedge clk &&& en, negedge d &&& en, 3);
+    $setuphold(posedge clk, d &&& en, 2, 3);
   endspecify
 endmodule // mod4

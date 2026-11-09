@@ -82,9 +82,9 @@ void vlog_symtab_free(vlog_symtab_t *st)
    free(st);
 }
 
-static vlog_symbol_t *fresh_symbol_for(vlog_symtab_t *st, ident_t name)
+static vlog_symbol_t *fresh_symbol_for(vlog_symtab_t *st, vlog_scope_t *s,
+                                       ident_t name)
 {
-   vlog_scope_t *s = st->top;
    assert(s != NULL);
    assert(is_power_of_2(s->max_symbols));
 
@@ -342,9 +342,15 @@ void vlog_symtab_lookup(vlog_symtab_t *st, vlog_node_t v)
 
       vlog_set_ref(v, decl);
 
-      vlog_add_decl(st->top->container, decl);
+      // Timing check delayed signals in a specify block are declared
+      // in the enclosing module
+      vlog_scope_t *s = st->top;
+      while (vlog_kind(s->container) == V_SPECIFY)
+         s = s->parent;
 
-      fresh_symbol_for(st, name)->node = decl;
+      vlog_add_decl(s->container, decl);
+
+      fresh_symbol_for(st, s, name)->node = decl;
    }
    else if (sym == NULL) {
       switch (vlog_kind(v)) {
@@ -366,7 +372,7 @@ void vlog_symtab_lookup(vlog_symtab_t *st, vlog_node_t v)
 void vlog_symtab_put(vlog_symtab_t *st, vlog_node_t v)
 {
    ident_t name = vlog_ident(v);
-   vlog_symbol_t *sym = fresh_symbol_for(st, name);
+   vlog_symbol_t *sym = fresh_symbol_for(st, st->top, name);
 
    assert(!loc_invalid_p(vlog_loc(v)));
 
@@ -422,7 +428,7 @@ void vlog_symtab_put(vlog_symtab_t *st, vlog_node_t v)
 
 void vlog_symtab_poison(vlog_symtab_t *st, ident_t name)
 {
-   vlog_symbol_t *sym = fresh_symbol_for(st, name);
+   vlog_symbol_t *sym = fresh_symbol_for(st, st->top, name);
    sym->node = POISON_NODE;
 }
 

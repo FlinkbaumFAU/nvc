@@ -6495,9 +6495,69 @@ static vlog_node_t p_delayed_data_or_reference(void)
 
    BEGIN("delayed data/reference");
 
-   p_identifier();
+   vlog_symtab_set_implicit(symtab, implicit_kind);
 
-   return NULL;
+   vlog_node_t v = vlog_new(V_REF);
+   vlog_set_ident(v, p_identifier());
+   vlog_set_loc(v, CURRENT_LOC);
+
+   vlog_symtab_lookup(symtab, v);
+
+   vlog_symtab_set_implicit(symtab, V_NET_NONE);
+
+   if (optional(tLSQUARE)) {
+      (void)p_constant_mintypmax_expression();
+      consume(tRSQUARE);
+   }
+
+   return v;
+}
+
+static void p_delayed_signal_assign(vlog_node_t parent, vlog_node_t delayed,
+                                    vlog_node_t event)
+{
+   // The delayed signal is a copy of the reference or data signal, see
+   // IEEE 1800-2017 section 31.9.  Negative limits are not supported
+   // so this is always a zero delay continuous assignment.
+
+   if (!vlog_has_ref(delayed))
+      return;   // Earlier error
+
+   vlog_node_t decl = vlog_ref(delayed);
+
+   // Several timing checks may name the same delayed signal
+   const int nstmts = vlog_stmts(parent);
+   for (int i = 0; i < nstmts; i++) {
+      vlog_node_t s = vlog_stmt(parent, i);
+      if (vlog_kind(s) == V_ASSIGN && vlog_ref(vlog_target(s)) == decl)
+         return;
+   }
+
+   vlog_node_t sig = vlog_param(event, 0);
+   if (vlog_kind(sig) == V_EVENT)
+      sig = vlog_value(sig);
+
+   if (!vlog_has_ref(sig))
+      return;   // Earlier error
+
+   vlog_node_t value = vlog_new(V_REF);
+   vlog_set_ident(value, vlog_ident(sig));
+   vlog_set_ref(value, vlog_ref(sig));
+   vlog_set_loc(value, vlog_loc(sig));
+
+   // Cannot use default_label as both delayed signals are created after
+   // parsing the whole timing check
+   const loc_t *loc = vlog_loc(delayed);
+   ident_t label = ident_sprintf("assign#%d#%d", loc->first_line,
+                                 loc->first_column);
+
+   vlog_node_t v = vlog_new(V_ASSIGN);
+   vlog_set_target(v, delayed);
+   vlog_set_ident(v, label);
+   vlog_set_value(v, value);
+   vlog_set_loc(v, vlog_loc(delayed));
+
+   vlog_add_stmt(parent, v);
 }
 
 static vlog_node_t p_period_timing_check(void)
@@ -6527,7 +6587,7 @@ static vlog_node_t p_period_timing_check(void)
    return NULL;
 }
 
-static vlog_node_t p_setuphold_or_recrem_timing_check(void)
+static vlog_node_t p_setuphold_or_recrem_timing_check(vlog_node_t parent)
 {
    // $setuphold ( reference_event , data_event , timing_check_limit ,
    //    timing_check_limit [ , [ notifier ] [ , [ timestamp_condition ]
@@ -6536,23 +6596,23 @@ static vlog_node_t p_setuphold_or_recrem_timing_check(void)
 
    BEGIN("setuphold/recrem timing check");
 
-   one_of(tDLRSETUPHOLD, tDLRRECREM);
+   // TODO: Support $recrem
+   const bool is_setuphold = (one_of(tDLRSETUPHOLD, tDLRRECREM)
+                              == tDLRSETUPHOLD);
    consume(tLPAREN);
 
-   (void)p_timing_check_event();
+   vlog_node_t v = vlog_new(V_TCHECK);
+   vlog_set_subkind(v, V_TCHECK_SETUPHOLD);
 
+   vlog_add_param(v, p_timing_check_event());
    consume(tCOMMA);
-
-   (void)p_timing_check_event();
-
+   vlog_add_param(v, p_timing_check_event());
    consume(tCOMMA);
-
-   (void)p_expression();
-
+   vlog_add_param(v, p_expression());
    consume(tCOMMA);
+   vlog_add_param(v, p_expression());
 
-   (void)p_expression();
-
+   vlog_node_t delayed_ref = NULL, delayed_data = NULL;
    if (optional(tCOMMA)) {
       if (peek() == tID)
          p_identifier(); // notifier
@@ -6567,11 +6627,11 @@ static vlog_node_t p_setuphold_or_recrem_timing_check(void)
 
             if (optional(tCOMMA)) {
                if (not_at_token(tCOMMA, tRPAREN))
-                  p_delayed_data_or_reference();  // delayed_reference
+                  delayed_ref = p_delayed_data_or_reference();
 
                if (optional(tCOMMA)) {
                   if (not_at_token(tCOMMA, tRPAREN))
-                     p_delayed_data_or_reference();  // delayed_data
+                     delayed_data = p_delayed_data_or_reference();
                }
             }
          }
@@ -6581,10 +6641,17 @@ static vlog_node_t p_setuphold_or_recrem_timing_check(void)
    consume(tRPAREN);
    consume(tSEMI);
 
-   return NULL;
+   vlog_set_loc(v, CURRENT_LOC);
+
+   if (delayed_ref != NULL)
+      p_delayed_signal_assign(parent, delayed_ref, vlog_param(v, 0));
+   if (delayed_data != NULL)
+      p_delayed_signal_assign(parent, delayed_data, vlog_param(v, 1));
+
+   return is_setuphold ? v : NULL;
 }
 
-static vlog_node_t p_system_timing_check(void)
+static vlog_node_t p_system_timing_check(vlog_node_t parent)
 {
    // $setup_timing_check | $hold_timing_check | $setuphold_timing_check
    //   | $recovery_timing_check | $removal_timing_check | $recrem_timing_check
@@ -6606,7 +6673,7 @@ static vlog_node_t p_system_timing_check(void)
       return p_period_timing_check();
    case tDLRSETUPHOLD:
    case tDLRRECREM:
-      return p_setuphold_or_recrem_timing_check();
+      return p_setuphold_or_recrem_timing_check(parent);
    default:
       should_not_reach_here();
    }
@@ -6718,7 +6785,7 @@ static void p_specify_item(vlog_node_t parent)
    case tDLRWIDTH:
    case tDLRPERIOD:
       {
-         vlog_node_t tcheck = p_system_timing_check();
+         vlog_node_t tcheck = p_system_timing_check(parent);
          // TODO: Remove once all timing checks are supported.
          if (tcheck != NULL)
             vlog_add_stmt(parent, tcheck);

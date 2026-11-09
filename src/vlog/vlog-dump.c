@@ -1059,6 +1059,9 @@ static void vlog_dump_tcheck(vlog_node_t v)
    case V_TCHECK_HOLD:
       print_syntax("$hold(");
       break;
+   case V_TCHECK_SETUPHOLD:
+      print_syntax("$setuphold(");
+      break;
    default:
       should_not_reach_here();
    }

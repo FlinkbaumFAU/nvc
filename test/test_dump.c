@@ -619,6 +619,7 @@ START_TEST(test_vlog1)
              "    $setup(edge d, clk, 10);\n"
              "    $setup(negedge d, posedge clk, 5);\n"
              "    $hold(posedge clk &&& en, negedge d &&& en, 3);\n"
+             "    $setuphold(posedge clk, d &&& en, 2, 3);\n"
              "  endspecify\n"
              "endmodule // mod4\n"
              "\n");

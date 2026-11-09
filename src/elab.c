@@ -1898,8 +1898,12 @@ static void elab_verilog_processes(vlog_node_t v, const elab_ctx_t *ctx)
             for (int i = 0; i < n_stmts; i++) {
                vlog_node_t stmt = vlog_stmt(s, i);
 
-               if (vlog_kind(stmt) == V_TCHECK) {
+               // Timing checks and their delayed signal assignments
+               const vlog_kind_t kind = vlog_kind(stmt);
+               if (kind == V_TCHECK || kind == V_ASSIGN) {
                   tree_t wrap = tree_new(T_VERILOG);
+                  if (kind == V_ASSIGN)
+                     tree_set_ident(wrap, vlog_ident(stmt));
                   tree_set_loc(wrap, vlog_loc(stmt));
                   tree_set_vlog(wrap, stmt);
                   tree_add_stmt(ctx->out, wrap);

@@ -3795,134 +3795,180 @@ static mir_value_t vlog_lower_tcheck_event(vlog_gen_t *g, vlog_node_t v)
    return cond;
 }
 
+typedef struct {
+   vlog_node_t stamp;
+   vlog_node_t check;
+   vlog_node_t limit;
+   bool        fail_simul;
+   mir_value_t var;
+} tcheck_window_t;
+
 static void vlog_lower_tcheck(vlog_gen_t *g, vlog_node_t tcheck)
 {
-   vlog_tcheck_kind_t tkind = vlog_subkind(tcheck);
+   // IEEE 1800-2017, 31.3
+   //             ev_0   ev_1     Fail condition
+   // -----------------------------------------------------------------
+   // $setup     stamp   check   check - limit <  stamp < check
+   // $hold      stamp   check   stamp         <= check < stamp + limit
+   // $removal   check   stamp   check - limit <  stamp < check
+   // $recovery  stamp   check   stamp         <= check < stamp + limit
+   //
+   // The ineqalities convert to:
+   //    limit >  check - stamp  >  0
+   //    limit >  check - stamp  >= 0
+   //
+   // $setuphold(ref, data, setup_limit, hold_limit) is equivalent to
+   // $setup(data, ref, setup_limit) and $hold(ref, data, hold_limit)
 
-   switch (tkind) {
+   tcheck_window_t windows[2];
+   int nwindows = 0;
+
+   switch (vlog_subkind(tcheck)) {
    case V_TCHECK_SETUP:
    case V_TCHECK_HOLD:
    case V_TCHECK_RECOVERY:
-   case V_TCHECK_REMOVAL:
-      {
-         assert(vlog_params(tcheck) >= 3);
-
-         // IEEE 1800-2017, 31.3
-         //             ev_0   ev_1     Fail condition
-         // -----------------------------------------------------------------
-         // $setup     stamp   check   check - limit <  stamp < check
-         // $hold      stamp   check   stamp         <= check < stamp + limit
-         // $removal   check   stamp   check - limit <  stamp < check
-         // $recovery  stamp   check   stamp         <= check < stamp + limit
-         //
-         // The ineqalities convert to:
-         //    limit >  check - stamp  >  0
-         //    limit >  check - stamp  >= 0
-
-         int stamp_index = (tkind == V_TCHECK_REMOVAL) ? 1 : 0;
-         int check_index = (tkind == V_TCHECK_REMOVAL) ? 0 : 1;
-
-         bool fail_simul = (tkind == V_TCHECK_HOLD ||
-                            tkind == V_TCHECK_RECOVERY);
-
-         vlog_node_t v_stamp = vlog_param(tcheck, stamp_index);
-         vlog_node_t v_check = vlog_param(tcheck, check_index);
-         vlog_node_t v_limit = vlog_param(tcheck, 2);
-
-         assert(vlog_kind(v_stamp) == V_TCHECK_EVENT);
-         assert(vlog_kind(v_check) == V_TCHECK_EVENT);
-
-         vlog_node_t sig_stamp = vlog_param(v_stamp, 0);
-         vlog_node_t sig_check = vlog_param(v_check, 0);
-
-         mir_value_t trig_stamp = vlog_lower_trigger(g, sig_stamp);
-         mir_value_t trig_check = vlog_lower_trigger(g, sig_check);
-
-         mir_value_t trigger = vlog_or_triggers(g, 2, trig_stamp, trig_check);
-         assert(!mir_is_null(trigger));
-
-         mir_type_t t_trigger = mir_trigger_type(g->mu);
-         mir_value_t trigger_var =
-            mir_add_var(g->mu, t_trigger, MIR_NULL_STAMP, ident_new("trigger"), 0);
-         mir_build_store(g->mu, trigger_var, trigger);
-
-         mir_type_t t_time = mir_time_type(g->mu);
-         mir_value_t t_zero = mir_const(g->mu, t_time, 0);
-         mir_value_t stamp_var = mir_add_var(g->mu, t_time,  MIR_NULL_STAMP,
-                                             ident_new("stamp"), 0);
-         mir_build_store(g->mu, stamp_var, t_zero);
-         mir_build_return(g->mu, MIR_NULL_VALUE);
-
-         mir_block_t start_bb = mir_add_block(g->mu);
-         assert(start_bb.id == 1);
-
-         mir_set_cursor(g->mu, start_bb, MIR_APPEND);
-
-         mir_value_t t = mir_build_load(g->mu, trigger_var);
-         mir_build_sched_event(g->mu, t, MIR_NULL_VALUE);
-
-         mir_block_t wait_bb = mir_add_block(g->mu);
-         mir_build_wait(g->mu, wait_bb);
-         mir_set_cursor(g->mu, wait_bb, MIR_APPEND);
-
-         mir_value_t t2 = mir_build_load(g->mu, trigger_var);
-         mir_build_clear_event(g->mu, t2, MIR_NULL_VALUE);
-
-         // Get current time
-         ident_t now_func =
-            ident_new("STD.STANDARD.NOW()25STD.STANDARD.DELAY_LENGTH");
-         mir_value_t pkg = mir_build_link_package(g->mu, well_known(W_STD_STANDARD));
-         mir_value_t args[1] = { pkg };
-         mir_value_t now = mir_build_fcall(g->mu, now_func, t_time, MIR_NULL_STAMP,
-                                           args, ARRAY_LEN(args));
-
-         // Check if events occured at this simulation time
-         mir_value_t stamp_cond = vlog_lower_tcheck_event(g, v_stamp);
-         mir_value_t check_cond = vlog_lower_tcheck_event(g, v_check);
-
-         mir_block_t check_bb = mir_add_block(g->mu);
-         mir_block_t stamp_bb = mir_add_block(g->mu);
-         mir_build_cond(g->mu, check_cond, check_bb, stamp_bb);
-
-         // Check time limit if check was active
-         mir_set_cursor(g->mu, check_bb, MIR_APPEND);
-         mir_value_t stamp = mir_build_load(g->mu, stamp_var);
-         mir_value_t diff_time = mir_build_sub(g->mu, t_time, now, stamp);
-
-         mir_value_t limit_val = vlog_lower_rvalue(g, v_limit);
-         mir_value_t limit_time = mir_build_cast(g->mu, t_time, limit_val);
-         mir_value_t ok = mir_build_cmp(g->mu, MIR_CMP_GEQ, diff_time, limit_time);
-
-         mir_value_t stamp_display = stamp;
-         if (fail_simul) {
-            mir_value_t stamp_cond_n = mir_build_not(g->mu, stamp_cond);
-            ok = mir_build_and(g->mu, ok, stamp_cond_n);
-            stamp_display = mir_build_select(g->mu, t_time, stamp_cond,
-                                             now, stamp);
-         }
-
-         mir_block_t fire_bb = mir_add_block(g->mu);
-         mir_build_cond(g->mu, ok, stamp_bb, fire_bb);
-
-         mir_set_cursor(g->mu, fire_bb, MIR_APPEND);
-         mir_value_t locus = mir_build_debug_locus(g->mu, vlog_to_object(tcheck));
-         mir_build_tcheck(g->mu, stamp_display, limit_time, locus);
-         mir_build_jump(g->mu, stamp_bb);
-
-         // Store time if stamp was active
-         mir_set_cursor(g->mu, stamp_bb, MIR_APPEND);
-         mir_block_t sample_bb = mir_add_block(g->mu);
-         mir_build_cond(g->mu, stamp_cond, sample_bb, start_bb);
-
-         mir_set_cursor(g->mu, sample_bb, MIR_APPEND);
-         mir_build_store(g->mu, stamp_var, now);
-         mir_build_jump(g->mu, start_bb);
-      }
+      assert(vlog_params(tcheck) >= 3);
+      windows[nwindows++] = (tcheck_window_t){
+         .stamp      = vlog_param(tcheck, 0),
+         .check      = vlog_param(tcheck, 1),
+         .limit      = vlog_param(tcheck, 2),
+         .fail_simul = vlog_subkind(tcheck) != V_TCHECK_SETUP,
+      };
       break;
-
+   case V_TCHECK_REMOVAL:
+      assert(vlog_params(tcheck) >= 3);
+      windows[nwindows++] = (tcheck_window_t){
+         .stamp      = vlog_param(tcheck, 1),
+         .check      = vlog_param(tcheck, 0),
+         .limit      = vlog_param(tcheck, 2),
+         .fail_simul = false,
+      };
+      break;
+   case V_TCHECK_SETUPHOLD:
+      assert(vlog_params(tcheck) >= 4);
+      windows[nwindows++] = (tcheck_window_t){
+         .stamp      = vlog_param(tcheck, 1),
+         .check      = vlog_param(tcheck, 0),
+         .limit      = vlog_param(tcheck, 2),
+         .fail_simul = false,
+      };
+      windows[nwindows++] = (tcheck_window_t){
+         .stamp      = vlog_param(tcheck, 0),
+         .check      = vlog_param(tcheck, 1),
+         .limit      = vlog_param(tcheck, 3),
+         .fail_simul = true,
+      };
+      break;
    // TODO: Support other timing check kinds
    default:
-      break;
+      return;
+   }
+
+   assert(vlog_kind(windows[0].stamp) == V_TCHECK_EVENT);
+   assert(vlog_kind(windows[0].check) == V_TCHECK_EVENT);
+
+   // All windows are sensitive to the same pair of events
+   vlog_node_t sig_stamp = vlog_param(windows[0].stamp, 0);
+   vlog_node_t sig_check = vlog_param(windows[0].check, 0);
+
+   mir_value_t trig_stamp = vlog_lower_trigger(g, sig_stamp);
+   mir_value_t trig_check = vlog_lower_trigger(g, sig_check);
+
+   mir_value_t trigger = vlog_or_triggers(g, 2, trig_stamp, trig_check);
+   assert(!mir_is_null(trigger));
+
+   mir_type_t t_trigger = mir_trigger_type(g->mu);
+   mir_value_t trigger_var =
+      mir_add_var(g->mu, t_trigger, MIR_NULL_STAMP, ident_new("trigger"), 0);
+   mir_build_store(g->mu, trigger_var, trigger);
+
+   mir_type_t t_time = mir_time_type(g->mu);
+   mir_value_t t_zero = mir_const(g->mu, t_time, 0);
+
+   for (int i = 0; i < nwindows; i++) {
+      ident_t name = i == 0 ? ident_new("stamp") : ident_sprintf("stamp%d", i);
+      windows[i].var = mir_add_var(g->mu, t_time, MIR_NULL_STAMP, name, 0);
+      mir_build_store(g->mu, windows[i].var, t_zero);
+   }
+
+   mir_build_return(g->mu, MIR_NULL_VALUE);
+
+   mir_block_t start_bb = mir_add_block(g->mu);
+   assert(start_bb.id == 1);
+
+   mir_set_cursor(g->mu, start_bb, MIR_APPEND);
+
+   mir_value_t t = mir_build_load(g->mu, trigger_var);
+   mir_build_sched_event(g->mu, t, MIR_NULL_VALUE);
+
+   mir_block_t wait_bb = mir_add_block(g->mu);
+   mir_build_wait(g->mu, wait_bb);
+   mir_set_cursor(g->mu, wait_bb, MIR_APPEND);
+
+   mir_value_t t2 = mir_build_load(g->mu, trigger_var);
+   mir_build_clear_event(g->mu, t2, MIR_NULL_VALUE);
+
+   // Get current time
+   ident_t now_func =
+      ident_new("STD.STANDARD.NOW()25STD.STANDARD.DELAY_LENGTH");
+   mir_value_t pkg = mir_build_link_package(g->mu, well_known(W_STD_STANDARD));
+   mir_value_t args[1] = { pkg };
+   mir_value_t now = mir_build_fcall(g->mu, now_func, t_time, MIR_NULL_STAMP,
+                                     args, ARRAY_LEN(args));
+
+   for (int i = 0; i < nwindows; i++) {
+      const tcheck_window_t *w = &(windows[i]);
+
+      assert(vlog_kind(w->stamp) == V_TCHECK_EVENT);
+      assert(vlog_kind(w->check) == V_TCHECK_EVENT);
+
+      // Check if events occured at this simulation time
+      mir_value_t stamp_cond = vlog_lower_tcheck_event(g, w->stamp);
+      mir_value_t check_cond = vlog_lower_tcheck_event(g, w->check);
+
+      mir_block_t check_bb = mir_add_block(g->mu);
+      mir_block_t stamp_bb = mir_add_block(g->mu);
+      mir_build_cond(g->mu, check_cond, check_bb, stamp_bb);
+
+      // Check time limit if check was active
+      mir_set_cursor(g->mu, check_bb, MIR_APPEND);
+      mir_value_t stamp = mir_build_load(g->mu, w->var);
+      mir_value_t diff_time = mir_build_sub(g->mu, t_time, now, stamp);
+
+      mir_value_t limit_val = vlog_lower_rvalue(g, w->limit);
+      mir_value_t limit_time = mir_build_cast(g->mu, t_time, limit_val);
+      mir_value_t ok = mir_build_cmp(g->mu, MIR_CMP_GEQ, diff_time, limit_time);
+
+      mir_value_t stamp_display = stamp;
+      if (w->fail_simul) {
+         mir_value_t stamp_cond_n = mir_build_not(g->mu, stamp_cond);
+         ok = mir_build_and(g->mu, ok, stamp_cond_n);
+         stamp_display = mir_build_select(g->mu, t_time, stamp_cond,
+                                          now, stamp);
+      }
+
+      mir_block_t fire_bb = mir_add_block(g->mu);
+      mir_build_cond(g->mu, ok, stamp_bb, fire_bb);
+
+      mir_set_cursor(g->mu, fire_bb, MIR_APPEND);
+      mir_value_t locus = mir_build_debug_locus(g->mu, vlog_to_object(tcheck));
+      mir_build_tcheck(g->mu, stamp_display, limit_time, locus);
+      mir_build_jump(g->mu, stamp_bb);
+
+      // Store time if stamp was active
+      mir_block_t next_bb =
+         i == nwindows - 1 ? start_bb : mir_add_block(g->mu);
+
+      mir_set_cursor(g->mu, stamp_bb, MIR_APPEND);
+      mir_block_t sample_bb = mir_add_block(g->mu);
+      mir_build_cond(g->mu, stamp_cond, sample_bb, next_bb);
+
+      mir_set_cursor(g->mu, sample_bb, MIR_APPEND);
+      mir_build_store(g->mu, w->var, now);
+      mir_build_jump(g->mu, next_bb);
+
+      if (i < nwindows - 1)
+         mir_set_cursor(g->mu, next_bb, MIR_APPEND);
    }
 }
 
@@ -4628,6 +4674,9 @@ void vlog_lower_instance(mir_context_t *mc, vlog_node_t body, ident_t parent,
                break;
             case V_TCHECK_REMOVAL:
                name = ident_uniq("$removal");
+               break;
+            case V_TCHECK_SETUPHOLD:
+               name = ident_uniq("$setuphold");
                break;
             default:
                should_not_reach_here();

@@ -1252,6 +1252,18 @@ static void vlog_check_tcheck_event(vlog_node_t v)
       vlog_check_expr(cond);
 }
 
+static void vlog_check_tcheck_limit(vlog_node_t limit)
+{
+   type_mask_t tmask = vlog_check_expr(limit);
+
+   if ((tmask & TM_CONST) == 0) {
+      diag_t *d = diag_new(DIAG_ERROR, vlog_loc(limit));
+      diag_printf(d, "not a constant expression");
+      diag_hint(d, vlog_loc(limit), "have '%s'", type_mask_str(tmask));
+      diag_emit(d);
+   }
+}
+
 static void vlog_check_tcheck(vlog_node_t v)
 {
    vlog_tcheck_kind_t kind = vlog_subkind(v);
@@ -1259,20 +1271,16 @@ static void vlog_check_tcheck(vlog_node_t v)
    switch (kind) {
    case V_TCHECK_SETUP:
    case V_TCHECK_HOLD:
-      {
-         vlog_check_tcheck_event(vlog_param(v, 0));
-         vlog_check_tcheck_event(vlog_param(v, 1));
+      vlog_check_tcheck_event(vlog_param(v, 0));
+      vlog_check_tcheck_event(vlog_param(v, 1));
+      vlog_check_tcheck_limit(vlog_param(v, 2));
+      break;
 
-         vlog_node_t limit = vlog_param(v, 2);
-         type_mask_t tmask = vlog_check_expr(limit);
-
-         if ((tmask & TM_CONST) == 0) {
-            diag_t *d = diag_new(DIAG_ERROR, vlog_loc(limit));
-            diag_printf(d, "not a constant expression");
-            diag_hint(d, vlog_loc(limit), "have '%s'", type_mask_str(tmask));
-            diag_emit(d);
-         }
-      }
+   case V_TCHECK_SETUPHOLD:
+      vlog_check_tcheck_event(vlog_param(v, 0));
+      vlog_check_tcheck_event(vlog_param(v, 1));
+      vlog_check_tcheck_limit(vlog_param(v, 2));
+      vlog_check_tcheck_limit(vlog_param(v, 3));
       break;
 
    default:
@@ -1290,6 +1298,9 @@ static void vlog_check_specify(vlog_node_t v)
       switch (vlog_kind(stmt)) {
       case V_TCHECK:
          vlog_check_tcheck(stmt);
+         break;
+      case V_ASSIGN:   // Timing check delayed signal
+         vlog_check_assign(stmt);
          break;
       default:
          break;
